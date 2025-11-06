@@ -1,6 +1,7 @@
 import express from "express";
-import cors from "cors";
 import dotenv from "dotenv";
+
+// Node 18+ are fetch nativ
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -23,18 +24,60 @@ if (!ONFIDO_API_TOKEN) {
   process.exit(1);
 }
 
-app.use(cors());
+/* ============================
+   CORS pentru Netlify + .env
+   ============================ */
+const CORS_ORIGIN = (process.env.CORS_ORIGIN || "")
+  .split(",")
+  .map(s => s.trim())
+  .filter(Boolean);
 
-// ============================================
-//  WEBHOOK Onfido (fără secret) — răspunde 200
-// ============================================
-const webhookStore = new Map();
+// Middleware CORS (înainte de orice JSON/body parser)
+app.use((req, res, next) => {
+  const origin = req.headers.origin || "";
+  let allow = false;
+
+  // permite *.netlify.app (prod + deploy previews)
+  try {
+    const host = new URL(origin).hostname;
+    if (/\.netlify\.app$/i.test(host)) allow = true;
+  } catch {
+    // origin poate lipsi (ex: curl)
+  }
+
+  // permite origini explicite din .env
+  if (!allow && CORS_ORIGIN.length) {
+    if (CORS_ORIGIN.includes("*") || CORS_ORIGIN.includes(origin)) allow = true;
+  }
+
+  if (allow) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+  }
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  // dacă folosești cookie-uri, deblochează credențialele:
+  // res.setHeader("Access-Control-Allow-Credentials", "true");
+
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  next();
+});
+
+/* ============================
+   Health
+   ============================ */
+app.get("/healthz", (_req, res) => res.send("ok"));
+
+/* ============================
+   WEBHOOK Onfido — fără secret
+   IMPORTANT: trebuie body RAW, deci îl punem
+   ÎNAINTE de express.json()
+   ============================ */
+const webhookStore = new Map(); // in-memory: runId -> payload esențial
 
 app.post("/webhook/onfido", express.raw({ type: "*/*", limit: "2mb" }), (req, res) => {
   try {
-    const raw = Buffer.isBuffer(req.body)
-      ? req.body
-      : Buffer.from(String(req.body || ""), "utf8");
+    const raw = Buffer.isBuffer(req.body) ? req.body : Buffer.from(String(req.body || ""), "utf8");
 
     let payload = {};
     try {
@@ -47,7 +90,10 @@ app.post("/webhook/onfido", express.raw({ type: "*/*", limit: "2mb" }), (req, re
     const resrc = payload?.payload?.resource || {};
     const output = resrc?.output || {};
     const runId =
-      resrc?.id || payload?.payload?.object?.id || payload?.object?.id || null;
+      resrc?.id ||
+      payload?.payload?.object?.id ||
+      payload?.object?.id ||
+      null;
 
     const mapped = {
       workflow_run_id: runId,
@@ -63,25 +109,30 @@ app.post("/webhook/onfido", express.raw({ type: "*/*", limit: "2mb" }), (req, re
 
     if (runId) {
       webhookStore.set(runId, mapped);
-      console.log("✅ Webhook primit pentru run:", runId, mapped.status);
+      console.log("✅ Webhook primit:", runId, "status:", mapped.status);
+    } else {
+      console.log("⚠️ Webhook fără run id");
     }
 
+    // Onfido așteaptă 200 rapid
     res.status(200).send("ok");
   } catch (err) {
     console.error("❌ Eroare webhook:", err);
+    // trimitem tot 200 ca să nu reîncerce agresiv
     res.status(200).send("ok");
   }
 });
 
+// Debug: vezi ce a ajuns în webhook
 app.get("/api/webhook_runs/:id", (req, res) => {
   const data = webhookStore.get(req.params.id);
   if (!data) return res.status(404).json({ message: "not found" });
   res.json(data);
 });
 
-// ============================================
-//  API Onfido
-// ============================================
+/* ============================
+   API JSON normal
+   ============================ */
 app.use(express.json({ limit: "2mb" }));
 
 async function onfidoFetch(pathname, opts = {}) {
@@ -96,54 +147,66 @@ async function onfidoFetch(pathname, opts = {}) {
   const text = await res.text();
   const json = text ? JSON.parse(text) : null;
   if (!res.ok) {
-    throw new Error(json?.error?.message || json?.message || `Onfido ${res.status}`);
+    const msg = json?.error?.message || json?.message || `Onfido ${res.status}`;
+    const err = new Error(msg);
+    err.status = res.status;
+    err.payload = json;
+    throw err;
   }
   return json;
 }
 
+// creează applicant
 app.post("/api/applicants", async (req, res) => {
   try {
-    const applicant = await onfidoFetch("/applicants", {
+    const applicant = await onfidoFetch(`/applicants`, {
       method: "POST",
-      body: JSON.stringify(req.body),
+      body: JSON.stringify(req.body || {}),
     });
     res.json(applicant);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(e.status || 500).json({ error: e.message, details: e.payload });
   }
 });
 
+// creează workflow_run (returnează și sdk_token)
 app.post("/api/workflow_runs", async (req, res) => {
   try {
-    const run = await onfidoFetch("/workflow_runs", {
+    const run = await onfidoFetch(`/workflow_runs`, {
       method: "POST",
-      body: JSON.stringify(req.body),
+      body: JSON.stringify(req.body || {}),
     });
     res.json(run);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(e.status || 500).json({ error: e.message, details: e.payload });
   }
 });
 
+// ia statusul + output mapat pentru UI
 app.get("/api/workflow_runs/:id", async (req, res) => {
   try {
     const runId = req.params.id;
-    const run = await onfidoFetch(`/workflow_runs/${encodeURIComponent(runId)}`);
+    const run = await onfidoFetch(`/workflow_runs/${encodeURIComponent(runId)}`, { method: "GET" });
+
+    const status = run?.status || null;
     const output = run?.output || {};
+
     res.json({
-      workflow_run_id: run.id,
-      status: run.status,
-      applicant_id: run.applicant_id,
-      document_type: output?.document_type,
-      document_number: output?.document_number,
-      date_of_birth: output?.dob,
-      date_expiry: output?.date_expiry,
-      gender: output?.gender,
-      dashboard_url: run.dashboard_url,
+      workflow_run_id: run?.id || runId,
+      status,
+      applicant_id: run?.applicant_id || null,
+      document_type: output?.document_type ?? null,
+      document_number: output?.document_number ?? null,
+      date_of_birth: output?.dob ?? null,
+      date_expiry: output?.date_expiry ?? null,
+      gender: output?.gender ?? null,
+      dashboard_url: run?.dashboard_url || null,
     });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(e.status || 500).json({ error: e.message, details: e.payload });
   }
 });
 
-app.listen(PORT, () => console.log(`✅ Server pornit pe http://localhost:${PORT}`));
+app.listen(PORT, () => {
+  console.log(`✅ Server pornit pe http://localhost:${PORT}`);
+});
