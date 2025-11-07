@@ -21,6 +21,7 @@ if (!ONFIDO_API_TOKEN) {
   process.exit(1);
 }
 
+/* CORS */
 const CORS_ORIGIN = (process.env.CORS_ORIGIN || "")
   .split(",")
   .map(s => s.trim())
@@ -29,16 +30,13 @@ const CORS_ORIGIN = (process.env.CORS_ORIGIN || "")
 app.use((req, res, next) => {
   const origin = req.headers.origin || "";
   let allow = false;
-
   try {
     const host = new URL(origin).hostname;
     if (/\.netlify\.app$/i.test(host)) allow = true;
   } catch {}
-
   if (!allow && CORS_ORIGIN.length) {
     if (CORS_ORIGIN.includes("*") || CORS_ORIGIN.includes(origin)) allow = true;
   }
-
   if (allow) {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Vary", "Origin");
@@ -51,12 +49,12 @@ app.use((req, res, next) => {
 
 app.get("/healthz", (_req, res) => res.send("ok"));
 
+/* Webhook raw body înainte de json parser */
 const webhookStore = new Map();
 
 app.post("/webhook/onfido", express.raw({ type: "*/*", limit: "5mb" }), (req, res) => {
   try {
     const raw = Buffer.isBuffer(req.body) ? req.body : Buffer.from(String(req.body || ""), "utf8");
-
     let payload = {};
     try {
       payload = JSON.parse(raw.toString("utf8"));
@@ -67,17 +65,13 @@ app.post("/webhook/onfido", express.raw({ type: "*/*", limit: "5mb" }), (req, re
 
     const resrc = payload?.payload?.resource || {};
     const output = resrc?.output || {};
-    const runId =
-      resrc?.id ||
-      payload?.payload?.object?.id ||
-      payload?.object?.id ||
-      null;
+    const runId = resrc?.id || payload?.payload?.object?.id || payload?.object?.id || null;
 
     const mapped = {
       workflow_run_id: runId,
       status: resrc?.status || payload?.payload?.object?.status || null,
       gender: output?.gender ?? null,
-      date_of_birth: output?.dob ?? null,
+      dob: output?.dob ?? null,
       document_type: output?.document_type ?? null,
       document_number: output?.document_number ?? null,
       date_expiry: output?.date_expiry ?? null,
@@ -88,11 +82,7 @@ app.post("/webhook/onfido", express.raw({ type: "*/*", limit: "5mb" }), (req, re
     };
 
     if (runId) {
-      webhookStore.set(runId, {
-        ...mapped,
-        raw_output: output,
-        raw_payload: payload,
-    });
+      webhookStore.set(runId, { ...mapped, raw_output: output, raw_payload: payload });
       console.log("✅ Webhook primit:", runId, "status:", mapped.status);
       console.log("ℹ️ Webhook output:", JSON.stringify(output, null, 2));
     } else {
@@ -112,6 +102,7 @@ app.get("/api/webhook_runs/:id", (req, res) => {
   res.json(data);
 });
 
+/* JSON parser după webhook */
 app.use(express.json({ limit: "2mb" }));
 
 async function onfidoFetch(pathname, opts = {}) {
@@ -135,6 +126,7 @@ async function onfidoFetch(pathname, opts = {}) {
   return json;
 }
 
+/* API proxy ușor */
 app.post("/api/applicants", async (req, res) => {
   try {
     const applicant = await onfidoFetch(`/applicants`, {
@@ -167,17 +159,18 @@ app.get("/api/workflow_runs/:id", async (req, res) => {
     const status = run?.status || null;
     const output = run?.output || {};
 
+    // expunem doar cheile standard, lowercase cu underscore
     res.json({
       workflow_run_id: run?.id || runId,
       status,
       applicant_id: run?.applicant_id || null,
       document_type: output?.document_type ?? null,
       document_number: output?.document_number ?? null,
-      date_of_birth: output?.dob ?? null,
+      dob: output?.dob ?? null,
       date_expiry: output?.date_expiry ?? null,
       gender: output?.gender ?? null,
-      first_name: output?.first_name ?? null,
-      last_name: output?.last_name ?? null,
+      full_name: output?.full_name ?? null,
+      address: output?.address ?? null,
       dashboard_url: run?.dashboard_url || null,
     });
   } catch (e) {
