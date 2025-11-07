@@ -1,6 +1,6 @@
+// server.mjs
 import express from "express";
 import dotenv from "dotenv";
-import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 
@@ -21,35 +21,28 @@ if (!ONFIDO_API_TOKEN) {
   process.exit(1);
 }
 
-/* CORS */
-const CORS_ORIGIN = (process.env.CORS_ORIGIN || "")
-  .split(",")
-  .map(s => s.trim())
-  .filter(Boolean);
-
+/* Wide-open CORS for stateless public API */
 app.use((req, res, next) => {
-  const origin = req.headers.origin || "";
-  let allow = false;
-  try {
-    const host = new URL(origin).hostname;
-    if (/\.netlify\.app$/i.test(host)) allow = true;
-  } catch {}
-  if (!allow && CORS_ORIGIN.length) {
-    if (CORS_ORIGIN.includes("*") || CORS_ORIGIN.includes(origin)) allow = true;
-  }
-  if (allow) {
-    res.setHeader("Access-Control-Allow-Origin", origin);
-    res.setHeader("Vary", "Origin");
-  }
+  res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Access-Control-Max-Age", "3600");
   if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
 });
+// Optional explicit OPTIONS handler for any path
+app.options("*", (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Access-Control-Max-Age", "3600");
+  res.sendStatus(204);
+});
 
+/* Health */
 app.get("/healthz", (_req, res) => res.send("ok"));
 
-/* Webhook raw body înainte de json parser */
+/* Webhook raw body before JSON parser */
 const webhookStore = new Map();
 
 app.post("/webhook/onfido", express.raw({ type: "*/*", limit: "5mb" }), (req, res) => {
@@ -102,7 +95,7 @@ app.get("/api/webhook_runs/:id", (req, res) => {
   res.json(data);
 });
 
-/* JSON parser după webhook */
+/* JSON parser after webhook */
 app.use(express.json({ limit: "2mb" }));
 
 async function onfidoFetch(pathname, opts = {}) {
@@ -126,7 +119,7 @@ async function onfidoFetch(pathname, opts = {}) {
   return json;
 }
 
-/* API proxy ușor */
+/* Lightweight API proxy */
 app.post("/api/applicants", async (req, res) => {
   try {
     const applicant = await onfidoFetch(`/applicants`, {
@@ -159,7 +152,6 @@ app.get("/api/workflow_runs/:id", async (req, res) => {
     const status = run?.status || null;
     const output = run?.output || {};
 
-    // expunem doar cheile standard, lowercase cu underscore
     res.json({
       workflow_run_id: run?.id || runId,
       status,
