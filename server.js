@@ -44,6 +44,7 @@ app.post("/webhook/onfido", express.raw({ type: "*/*", limit: "5mb" }), (req, re
 
     const resrc = payload?.payload?.resource || {};
     const output = resrc?.output || {};
+    
     const runId = resrc?.workflow_run_id || resrc?.id || payload?.payload?.object?.id || null;
 
     if (runId) {
@@ -59,15 +60,19 @@ app.post("/webhook/onfido", express.raw({ type: "*/*", limit: "5mb" }), (req, re
           });
       }
 
+      if (output.properties && typeof output.properties === 'object') {
+           Object.keys(output.properties).forEach(key => {
+              mergedOutput[key] = output.properties[key];
+           });
+      }
+
       let status = existing.status;
       if (resrc.status && resrc.status !== "processing") {
           status = resrc.status; 
-      } else if (!status) {
-          status = resrc.status;
       }
 
       const breakdown = output?.breakdown || existing.breakdown || null;
-      const result = output?.result || existing.result || null;
+      const result = output?.sub_result || output?.result || existing.result || null;
 
       const merged = {
         ...existing,
@@ -121,8 +126,9 @@ async function onfidoFetch(pathname, opts = {}) {
 
 app.post("/api/applicants", async (req, res) => {
   try {
-    const { first_name, last_name, email } = req.body || {};
-    const payload = { first_name, last_name, email };
+    const { first_name, last_name, email, phone_number } = req.body || {};
+    const payload = { first_name, last_name, email, phone_number };
+    
     const applicant = await onfidoFetch(`/applicants`, {
       method: "POST",
       body: JSON.stringify(payload),
