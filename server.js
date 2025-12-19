@@ -44,56 +44,78 @@ app.post("/webhook/onfido", express.raw({ type: "*/*", limit: "5mb" }), (req, re
 
     const resrc = payload?.payload?.resource || {};
     const output = resrc?.output || {};
-    
-    const runId = resrc?.workflow_run_id || resrc?.id || payload?.payload?.object?.id || null;
+    const obj = payload?.payload?.object || {};
 
-    if (runId) {
-      const existing = webhookStore.get(runId) || { raw_output: {} };
-      
-      const mergedOutput = { ...existing.raw_output };
+    const runId =
+      resrc?.workflow_run_id ||
+      obj?.workflow_run_id ||
+      (payload?.payload?.resource_type === "workflow_run" ? resrc?.id : null) ||
+      null;
 
-      if (output && typeof output === 'object' && !Array.isArray(output)) {
-          Object.keys(output).forEach(key => {
-              if (output[key] !== null && output[key] !== undefined) {
-                  mergedOutput[key] = output[key];
-              }
-          });
+    if (!runId) return res.status(200).send("ok");
+
+    const existing = webhookStore.get(runId) || {
+      raw_output: {},
+      breakdowns: {},        
+      document_breakdown: null,
+      device_breakdown: null,
+    };
+
+    const mergedOutput = { ...existing.raw_output };
+
+    if (output && typeof output === "object" && !Array.isArray(output)) {
+      for (const k of Object.keys(output)) {
+        if (output[k] !== null && output[k] !== undefined) mergedOutput[k] = output[k];
       }
-
-      if (output.properties && typeof output.properties === 'object') {
-           Object.keys(output.properties).forEach(key => {
-              mergedOutput[key] = output.properties[key];
-           });
-      }
-
-      let status = existing.status;
-      if (resrc.status && resrc.status !== "processing") {
-          status = resrc.status; 
-      }
-
-      const breakdown = output?.breakdown || existing.breakdown || null;
-      const result = output?.sub_result || output?.result || existing.result || null;
-
-      const merged = {
-        ...existing,
-        workflow_run_id: runId,
-        status: status,
-        result: result,
-        breakdown: breakdown,
-        full_name: output?.full_name || existing.full_name, 
-        raw_output: mergedOutput, 
-        received_at: new Date().toISOString(),
-      };
-
-      webhookStore.set(runId, merged);
     }
 
-    res.status(200).send("ok");
+    if (output?.properties && typeof output.properties === "object") {
+      for (const k of Object.keys(output.properties)) mergedOutput[k] = output.properties[k];
+    }
+
+    const taskDefId = resrc?.task_def_id || obj?.task_def_id || null;
+
+    if (taskDefId && output?.breakdown && typeof output.breakdown === "object") {
+      existing.breakdowns[taskDefId] = output.breakdown;
+
+      if (output.breakdown.visual_authenticity) {
+        existing.document_breakdown = output.breakdown;
+      }
+
+      if (output.breakdown.device) {
+        existing.device_breakdown = output.breakdown;
+      }
+    }
+
+    let status = existing.status;
+    if (typeof resrc?.status === "string" && resrc.status !== "processing") status = resrc.status;
+
+    const result = output?.sub_result || output?.result || existing.result || null;
+
+    const primaryBreakdown =
+      existing.document_breakdown ||
+      existing.breakdowns?.document_check_with_address_information ||
+      existing.breakdown ||
+      null;
+
+    const merged = {
+      ...existing,
+      workflow_run_id: runId,
+      status,
+      result,
+      breakdown: primaryBreakdown,
+      raw_output: mergedOutput,
+      received_at: new Date().toISOString(),
+    };
+
+    webhookStore.set(runId, merged);
+    return res.status(200).send("ok");
   } catch (err) {
     console.error("Webhook error", err);
-    res.status(200).send("ok");
+    return res.status(200).send("ok");
   }
 });
+
 
 app.get("/api/webhook_runs/:id", (req, res) => {
   const data = webhookStore.get(req.params.id);
